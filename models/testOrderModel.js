@@ -1,6 +1,10 @@
 const mongoose = require("mongoose");
 
-const RegisterSchema = new mongoose.Schema({
+const TestOrderSchema = new mongoose.Schema({
+	provider:{
+		fromProvider: Boolean,
+		providerId: mongoose.Schema.Types.ObjectId
+	},
 	firstName: String,
 	lastName: String,
 	streetAddress: String,
@@ -19,6 +23,6 @@ const RegisterSchema = new mongoose.Schema({
 	scheduledAt: Date,
 })
 
-const registerModel = mongoose.model("Registration", RegisterSchema);
+const testOrdersModel = mongoose.model("TestOrders", TestOrderSchema);
 
-module.exports = registerModel;
+module.exports = testOrdersModel;

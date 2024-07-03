@@ -2,142 +2,188 @@ require('dotenv').config();
 const express = require("express");
 const app = express();
 const cors = require("cors");
-var ApiContracts = require('authorizenet').APIContracts;
-var ApiControllers = require('authorizenet').APIControllers;
-var utils = require('./utils.js');
-var constants = require('./constants.js');
-const registerModel = require("./models/testRegisterModel.js");
+const testOrdersModel = require("./models/testOrderModel.js");
 const mongoose = require("mongoose");
 const { Connectdb } = require("./config/dbConn.js");
-const { format } = require('date-fns/format');
-
-
-function getAnAcceptPaymentPage(callback) {
-
-	var merchantAuthenticationType = new ApiContracts.MerchantAuthenticationType();
-	merchantAuthenticationType.setName(constants.apiLoginKey);
-	merchantAuthenticationType.setTransactionKey(constants.transactionKey);
-
-	var transactionRequestType = new ApiContracts.TransactionRequestType();
-	transactionRequestType.setTransactionType(ApiContracts.TransactionTypeEnum.AUTHCAPTURETRANSACTION);
-	transactionRequestType.setAmount(utils.getRandomAmount());	
-	
-	var setting1 = new ApiContracts.SettingType();
-	setting1.setSettingName('hostedPaymentButtonOptions');
-	setting1.setSettingValue('{\"text\": \"Pay\"}');
-
-	var setting2 = new ApiContracts.SettingType();
-	setting2.setSettingName('hostedPaymentOrderOptions');
-	setting2.setSettingValue('{\"show\": false}');
-
-	var settingList = [];
-	settingList.push(setting1);
-	settingList.push(setting2);
-
-	var alist = new ApiContracts.ArrayOfSetting();
-	alist.setSetting(settingList);
-
-	var getRequest = new ApiContracts.GetHostedPaymentPageRequest();
-	getRequest.setMerchantAuthentication(merchantAuthenticationType);
-	getRequest.setTransactionRequest(transactionRequestType);
-	getRequest.setHostedPaymentSettings(alist);
-
-	//console.log(JSON.stringify(getRequest.getJSON(), null, 2));
-		
-	var ctrl = new ApiControllers.GetHostedPaymentPageController(getRequest.getJSON());
-
-	ctrl.execute(function(){
-
-		var apiResponse = ctrl.getResponse();
-
-		var response = new ApiContracts.GetHostedPaymentPageResponse(apiResponse);
-
-		//pretty print response
-		//console.log(JSON.stringify(response, null, 2));
-
-		if(response != null) {
-			if(response.getMessages().getResultCode() == ApiContracts.MessageTypeEnum.OK) {
-				console.log('Hosted payment page token :');
-				console.log(response.getToken());
-			} else {
-				//console.log('Result Code: ' + response.getMessages().getResultCode());
-				console.log('Error Code: ' + response.getMessages().getMessage()[0].getCode());
-				console.log('Error message: ' + response.getMessages().getMessage()[0].getText());
-			}
-		} else {
-			console.log('Null response received');
-		}
-		callback(response);
-	});
-}
+const getAnAcceptPaymentPage = require('./config/formTokenConfig.js');
+const providerModel = require('./models/providerModel.js');
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const upload = require("./config/uploader.js");
+const { sendMail } = require('./config/mailerConfig.js');
+const { registrationHTML, registrationSUB } = require('./constants.js');
 
 app.use(cors({
-	origin:['http://192.168.16.36:5173']
+	origin: ['http://192.168.16.36:5173']
 }))
 app.use(express.json());
-app.use(express.urlencoded({extended: true}));
+app.use(express.urlencoded({ extended: true }));
 app.use(express.static("public"));
 
 Connectdb();
 
 
-app.get("/colo-pay", (req, res)=>{
-	console.log("Generating a form token")
-	getAnAcceptPaymentPage((response)=>{ res.status(200).json({code: response}); console.log("RESPONSE", response)});
+app.get("/colo-pay", (req, res) => {
+	console.log("Generating a form token");
+	getAnAcceptPaymentPage((response) => { res.status(200).json({ code: response }); console.log("RESPONSE", response) });
 })
-// 
+
 app.post("/register-new-test-data", async (req, res) => {
-	console.log("Registration data", req.body);
-	const newRegistration = registerModel.create({
-		firstName: req.body.firstName,
-		lastName: req.body.lastName,
-		streetAddress: req.body.streetAddress,
-		city: req.body.city,
-		state: req.body.state,
-		zip: req.body.zip,
-		phone: req.body.phone,
-		email: req.body.email,
-		dob: req.body.dob,
-		race: req.body.race,
-		ethnicity: req.body.ethnicity,
-		registrationConsent: req.body.confirm,
-		scheduledAt: req.body.scheduledAt
-	});
-	await (await newRegistration).save();
-	res.status(200).json({success: true, msg: "registration successful"});
+	try {
+		console.log("Registration data", req.body);
+		const newRegistration = testOrdersModel.create({
+			provider: {
+				fromProvider: false,
+			},
+			firstName: req.body.firstName,
+			lastName: req.body.lastName,
+			streetAddress: req.body.streetAddress,
+			city: req.body.city,
+			state: req.body.state,
+			zip: req.body.zip,
+			phone: req.body.phone,
+			email: req.body.email,
+			dob: req.body.dob,
+			race: req.body.race,
+			ethnicity: req.body.ethnicity,
+			registrationConsent: req.body.confirm,
+			scheduledAt: req.body.scheduledAt
+		});
+		await (await newRegistration).save();
+		res.status(200).json({ success: true, msg: "registration successful" });
+	} catch (error) {
+		console.log(error);
+		res.status(500).json({ success: false, error })
+	}
 })
 
-app.post("/register-user", async (req, res) => {
-	
+app.post("/register-provider", upload.single("profileImage"), async (req, res) => {
+	try {
+		const { firstName, lastName, dob, email, phone, password } = req.body;
+		const match = await providerModel.findOne({ email: email });
+		if (match) return res.status(400).json({ success: false, msg: "Email is already registered" });
+		const hash = await bcrypt.hash(password, 10);
+		const newProvider = new providerModel({
+			firstName,
+			lastName,
+			dob,
+			email,
+			phone,
+			password: hash,
+			accessToken: "NULL",
+			joined: new Date(),
+			orderCount: 0,
+			profileImage: req.file.filename,
+		});
+
+		await newProvider.save();
+
+		sendMail(email, registrationHTML(newProvider), registrationSUB)
+
+		res.status(200).json({ success: true, msg: "User registered" });
+	} catch (error) {
+		console.log(error);
+		res.status(500).json({ success: false, error })
+	}
+
 });
 
-app.post("/login-user", async (req, res) => {
+app.post("/provider-login", async (req, res) => {
+	try {
+		console.log(req.body);
+		const { email, password, rememberMe } = req.body;
+		if (!email) return res.status(400).json({ success: false, msg: "Bad request, email is missing" });
+		if (!password) return res.status(400).json({ success: false, msg: "Bad request, password is missing" });
 
+		const match = await providerModel.findOne({ email: email });
+		if (!match) return res.status(400).json({ success: false, msg: "Bad request, please check your email and/or password" });
+
+		if (await bcrypt.compare(password, match.password)) {
+			const accessToken = jwt.sign({ email: email, id: match._id }, process.env.JWT_ACCESS_TOKEN_SECRET, { expiresIn: '1d' });
+
+			match.accessToken = accessToken;
+			await match.save();
+
+			return res.status(200).json({ success: true, msg: "Login success", data: { firstName: match.firstName, lastName: match.lastName, dob: match.dob, email: match.email, phone: match.phone, orderCount: match.orderCount, joined: match.joined, accessToken: match.accessToken, profileImage: match.profileImage } });
+		} else {
+			return res.status(400).json({ success: false, msg: "Bad request, please check your email and/or password" });
+		}
+
+	} catch (error) {
+		console.log(error);
+		res.status(500).json({ success: false, error })
+	}
 });
+
+app.post("/verify", async (req, res) => {
+	try {
+		const {accessToken} = req.body;
+		if(!accessToken) return res.status(400).json({success: false});
+		const decoded = await jwt.verify(accessToken, process.env.JWT_ACCESS_TOKEN_SECRET);
+		if(decoded){
+			const match = await providerModel.findOne({email: decoded.email});
+			if(match.accessToken === accessToken){
+				res.status(200).json({success: true});
+			}
+		}
+	} catch (error) {
+		console.log(error);
+		res.status(500).json({ success: false, error });
+	}
+})
+
+app.post("/password-reset", async (req, res) => {
+	try {
+		const {oldPassword, newPassword, newConfirmPassword, accessToken} = req.body;
+
+		if(!accessToken) return res.status(401).json({success: false});
+		const decoded = await jwt.verify(accessToken, process.env.JWT_ACCESS_TOKEN_SECRET);
+		const match = await providerModel.findOne({email: decoded.email});
+		if(!match) return res.status(401).json({success: false});
+		if(await bcrypt.compare(oldPassword, match.password)){
+			const hash = await bcrypt.hash(newPassword, 10);
+			match.password = hash;
+			await match.save();
+			res.status(200).json({success: true, msg: "password changed successfully"})
+		} else {
+			return res.status(400).json({success: false});
+		}
+
+	} catch (error) {
+		console.log(error);
+		res.status(500).json({ success: false, error });
+	}
+})
 
 app.get("/get-scheduled-times", async (req, res) => {
 	try {
-		// 
 		console.log("This endpoint is called : getting scheduled times");
 		const today = new Date();
-		const matches = await registerModel.find({scheduledAt:{$gt: today}});
+		const matches = await testOrdersModel.find({ scheduledAt: { $gt: today } });
 		const blockedTimes = matches.map(item => item.scheduledAt);
-		res.status(200).json({success: true, blockedTimes});		
+		res.status(200).json({ success: true, blockedTimes });
 	} catch (error) {
 		console.log(error);
-		res.status(500).json({success: false, error: error})
+		res.status(500).json({ success: false, error: error })
 	}
 })
 
 app.post("clear-scheduled-time", async (req, res) => {
-	
+	// if payment failed
+	// clear the scheduled time
+	// on payment success add this info to the user registrations to confirm. 
 })
 
-mongoose.connection.once("connected", ()=>{
+app.post("get-provider-orders", async (req, res) => {
+	// get providerId
+	// get test orders where provider id matches
+	// filter according to search, page, and itemsPerPage query values
+	// send
+})
 
-	console.log("Connected to Database");
-	app.listen(4001, "0.0.0.0", ()=>{
+mongoose.connection.once("connected", () => {
+	console.log("\nConnected to Database");
+	app.listen(4001, "0.0.0.0", () => {
 		console.log("COLOHEALTH : Server is running.")
 	})
-
 })
