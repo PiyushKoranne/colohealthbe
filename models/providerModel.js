@@ -3,11 +3,11 @@ const mongoose = require("mongoose");
 const ProviderSchema = new mongoose.Schema({
 	firstName: String,
 	lastName: String,
-	dob: Date,
+	dob: String,
 	email: String,
 	phone: String,
 	orderCount: Number,
-	joined: Date,
+	joined: String,
 	password: String,
 	accessToken: String,
 	profileImage: String,

@@ -1,4 +1,5 @@
 require('dotenv').config();
+const path = require("path");
 const express = require("express");
 const app = express();
 const cors = require("cors");
@@ -13,12 +14,10 @@ const upload = require("./config/uploader.js");
 const { sendMail } = require('./config/mailerConfig.js');
 const { registrationHTML, registrationSUB } = require('./constants.js');
 
-app.use(cors({
-	origin: ['http://192.168.16.36:5173']
-}))
+app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static("public"));
+app.use(express.static("static"));
 
 Connectdb();
 
@@ -28,13 +27,49 @@ app.get("/colo-pay", (req, res) => {
 	getAnAcceptPaymentPage((response) => { res.status(200).json({ code: response }); console.log("RESPONSE", response) });
 })
 
+app.post("/verify-payment", async (req, res) => {
+	try {
+		const { pv, regId } = req.body;
+		const match = await testOrdersModel.findOne({ _id: regId });
+		if (!match) return res.status(400).json({ success: true, msg: "bad request, no match found" });
+		if (match.paymentInformation.paymentVerificationHash !== pv) {
+			return res.status(400).json({ success: true, msg: "bad request, no verification token found" });
+		}
+		const decoded = await jwt.verify(match.paymentInformation.paymentVerificationHash, "Test101Credentials");
+		if (!decoded || decoded.regId !== match._id.toString()) return res.status(400).json({ success: true, msg: "bad request, verification token invalid" });
+		await testOrdersModel.findOneAndUpdate({ _id: regId }, {
+			$set: {
+				'paymentInformation.status': "COMPLETED",
+				'paymentInformation.transactionId': "COMPLETED__"+match._id.toString(),
+				'paymentInformation.paymentVerificationHash': "COMPLETED",
+				paymentConfirmed: true,
+			}
+		})
+		return res.status(200).json({ success: true, data: { scheduledAt: match.scheduledAt } });
+
+	} catch (error) {
+		console.log(error);
+		res.status(500).json({ success: false, error })
+	}
+})
+
+
 app.post("/register-new-test-data", async (req, res) => {
 	try {
 		console.log("Registration data", req.body);
-		const newRegistration = testOrdersModel.create({
-			provider: {
-				fromProvider: false,
-			},
+		const count = await testOrdersModel.countDocuments();
+
+
+		const {providerId} = req.body;
+		let checkProvider = false;
+		if(providerId){
+			const providerMatch = await providerModel.findOne({_id: providerId});
+			if(providerMatch) checkProvider = true;
+		}
+
+		const newRegistration = new testOrdersModel({
+			providerId: (req.body.providerId && checkProvider) ? req.body.providerId : 'NULL',
+			orderId: `${11500 + count + 1}`,
 			firstName: req.body.firstName,
 			lastName: req.body.lastName,
 			streetAddress: req.body.streetAddress,
@@ -44,13 +79,34 @@ app.post("/register-new-test-data", async (req, res) => {
 			phone: req.body.phone,
 			email: req.body.email,
 			dob: req.body.dob,
+			gender: req.body.gender,
 			race: req.body.race,
 			ethnicity: req.body.ethnicity,
 			registrationConsent: req.body.confirm,
-			scheduledAt: req.body.scheduledAt
+			scheduledAt: req.body.scheduledAt,
+			paymentConfirmed: false,
+			paymentInformation: {
+				status: "PENDING",
+				transactionId: "PENDING"
+			}
 		});
-		await (await newRegistration).save();
-		res.status(200).json({ success: true, msg: "registration successful" });
+		await newRegistration.save();
+
+		const paymentVerificationToken = await jwt.sign({ regId: newRegistration._id }, "Test101Credentials");
+		await testOrdersModel.findOneAndUpdate({ _id: newRegistration._id }, {
+			$set: {
+				'paymentInformation.paymentVerificationHash': paymentVerificationToken
+			}
+		});
+
+		getAnAcceptPaymentPage((error, response) => {
+			if (error) {
+				throw error;
+			} else {
+				res.status(200).json({ code: response.token, regid: response.regid })
+			}
+		}, newRegistration._id, paymentVerificationToken);
+
 	} catch (error) {
 		console.log(error);
 		res.status(500).json({ success: false, error })
@@ -104,7 +160,7 @@ app.post("/provider-login", async (req, res) => {
 			match.accessToken = accessToken;
 			await match.save();
 
-			return res.status(200).json({ success: true, msg: "Login success", data: { firstName: match.firstName, lastName: match.lastName, dob: match.dob, email: match.email, phone: match.phone, orderCount: match.orderCount, joined: match.joined, accessToken: match.accessToken, profileImage: match.profileImage } });
+			return res.status(200).json({ success: true, msg: "Login success", data: { _id: match._id, firstName: match.firstName, lastName: match.lastName, dob: match.dob, email: match.email, phone: match.phone, orderCount: match.orderCount, joined: match.joined, accessToken: match.accessToken, profileImage: match.profileImage } });
 		} else {
 			return res.status(400).json({ success: false, msg: "Bad request, please check your email and/or password" });
 		}
@@ -155,12 +211,27 @@ app.post("/password-reset", async (req, res) => {
 	}
 })
 
+function parseDateString(dateString) {
+  const [datePart, timePart] = dateString.split(', ');
+  const [day, month, year] = datePart.split('/').map(Number);
+  const [hours, minutes, seconds] = timePart.split(':').map(Number);
+
+  // Note: Month is 0-based in JavaScript Date, so we subtract 1 from the month
+  return new Date(year, month - 1, day, hours, minutes, seconds);
+}
+
 app.get("/get-scheduled-times", async (req, res) => {
 	try {
 		console.log("This endpoint is called : getting scheduled times");
 		const today = new Date();
-		const matches = await testOrdersModel.find({ scheduledAt: { $gt: today } });
-		const blockedTimes = matches.map(item => item.scheduledAt);
+		const matches = await testOrdersModel.find({ paymentConfirmed: true });
+		const finalDates =  matches.filter(item => {
+			let tempDate = parseDateString(item.scheduledAt);
+			let today = new Date();
+			if(tempDate > today) return true;
+			return false;
+		})
+		const blockedTimes = finalDates.map(item => item.scheduledAt);
 		res.status(200).json({ success: true, blockedTimes });
 	} catch (error) {
 		console.log(error);
@@ -181,9 +252,37 @@ app.post("get-provider-orders", async (req, res) => {
 	// send
 })
 
+
+// Serve index.html for any subpath under /app
+app.get("/provider-login", (req, res) => {
+    res.sendFile(path.join(__dirname, "static/index.html"));
+});
+
+app.get("/provider-portal", (req, res) => {
+    res.sendFile(path.join(__dirname, "static/index.html"));
+});
+
+
+app.get("/thank-you", (req, res) => {
+    res.sendFile(path.join(__dirname, "static/index.html"));
+});
+
+
+app.get("/not-eligible", (req, res) => {
+    res.sendFile(path.join(__dirname, "static/index.html"));
+});
+
+app.get("/app", (req, res) => {
+    res.sendFile(path.join(__dirname, "static/index.html"));
+});
+
+// Serve index.html for any subpath under /app
+app.get("/app/*", (req, res) => {
+    res.sendFile(path.join(__dirname, "static/index.html"));
+});
+
 mongoose.connection.once("connected", () => {
 	console.log("\nConnected to Database");
 	app.listen(4001, "0.0.0.0", () => {
-		console.log("COLOHEALTH : Server is running.")
 	})
 })
